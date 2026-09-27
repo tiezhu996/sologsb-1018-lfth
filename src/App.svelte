@@ -36,8 +36,11 @@
   let issueWord = ''
   let issueCategory = '声调'
   let issueNote = ''
+  let relapseNotice = ''
   let feedbackText = ''
   let newCategory = ''
+  let mergeSource = ''
+  let mergeTarget = ''
   let undoStack: PracticeProject[] = []
   let redoStack: PracticeProject[] = []
   let selectedGroup: SenseGroup | undefined
@@ -51,6 +54,36 @@
   $: averageAccuracy = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / selectedAttempt.scores.length) : 0
   $: averageDeviation = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.deviation, 0) / selectedAttempt.scores.length) : 0
   $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length }))
+  $: wordSummaries = summarizeWordIssues(project.attempts)
+  $: mergeAffected = mergeSource ? project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === mergeSource).length : 0
+
+  interface WordSummary {
+    word: string
+    total: number
+    pending: number
+    categories: string[]
+    lastNumber: number
+    lastLabel: string
+  }
+
+  function summarizeWordIssues(attempts: Attempt[]): WordSummary[] {
+    const summaries = new Map<string, WordSummary>()
+    for (const attempt of attempts) {
+      for (const issue of attempt.wordIssues) {
+        let summary = summaries.get(issue.word)
+        if (!summary) {
+          summary = { word: issue.word, total: 0, pending: 0, categories: [], lastNumber: attempt.number, lastLabel: attempt.label }
+          summaries.set(issue.word, summary)
+        }
+        summary.total += 1
+        if (!issue.resolved) summary.pending += 1
+        summary.lastNumber = attempt.number
+        summary.lastLabel = attempt.label
+        if (!summary.categories.includes(issue.category)) summary.categories.push(issue.category)
+      }
+    }
+    return [...summaries.values()].sort((a, b) => b.pending - a.pending || b.total - a.total || a.word.localeCompare(b.word, 'zh-CN'))
+  }
 
   const clone = <T,>(value: T): T => structuredClone(value)
   const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -293,12 +326,30 @@
 
   function addWordIssue() {
     if (!selectedAttempt || !selectedGroup || !issueWord.trim()) return
+    const word = issueWord.trim()
+    let relapsed = 0
     editProject((draft) => {
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.word === word && issue.resolved) {
+            issue.resolved = false
+            relapsed += 1
+          }
+        }
+      }
       const attempt = draft.attempts.find((item) => item.id === selectedAttemptId)
-      attempt?.wordIssues.push({ id: uid('issue'), groupId: selectedGroupId, word: issueWord.trim(), category: issueCategory, note: issueNote.trim() })
+      attempt?.wordIssues.push({ id: uid('issue'), groupId: selectedGroupId, word, category: issueCategory, note: issueNote.trim(), resolved: false })
     })
+    relapseNotice = relapsed ? `「${word}」此前有 ${relapsed} 条记录已标为已纠正，本次再次出错，已自动退回待纠正。` : ''
     issueWord = ''
     issueNote = ''
+  }
+
+  function toggleIssueResolved(issueId: string) {
+    editProject((draft) => {
+      const issue = draft.attempts.find((item) => item.id === selectedAttemptId)?.wordIssues.find((item) => item.id === issueId)
+      if (issue) issue.resolved = !issue.resolved
+    })
   }
 
   function removeWordIssue(issueId: string) {
@@ -340,6 +391,43 @@
     if (!newCategory.trim() || project.errorCategories.includes(newCategory.trim())) return
     editProject((draft) => { draft.errorCategories.push(newCategory.trim()) })
     newCategory = ''
+  }
+
+  function renameCategory(category: string) {
+    const next = prompt(`将分类「${category}」改名为：`, category)?.trim()
+    if (!next || next === category) return
+    if (project.errorCategories.includes(next)) {
+      alert(`已存在分类「${next}」，如需并入请使用下方的合并功能。`)
+      return
+    }
+    editProject((draft) => {
+      draft.errorCategories = draft.errorCategories.map((item) => (item === category ? next : item))
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.category === category) issue.category = next
+        }
+      }
+    })
+    if (issueCategory === category) issueCategory = next
+    if (mergeSource === category) mergeSource = next
+    if (mergeTarget === category) mergeTarget = next
+  }
+
+  function mergeCategories() {
+    if (!mergeSource || !mergeTarget || mergeSource === mergeTarget) return
+    if (mergeAffected > 0 && !confirm(`分类「${mergeSource}」还有 ${mergeAffected} 条错词记录，合并后将全部归入「${mergeTarget}」。确定合并吗？`)) return
+    editProject((draft) => {
+      draft.errorCategories = draft.errorCategories.filter((item) => item !== mergeSource)
+      if (!draft.errorCategories.includes(mergeTarget)) draft.errorCategories.push(mergeTarget)
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.category === mergeSource) issue.category = mergeTarget
+        }
+      }
+    })
+    if (issueCategory === mergeSource) issueCategory = mergeTarget
+    mergeSource = ''
+    mergeTarget = ''
   }
 
   function resetSample() {
@@ -629,13 +717,17 @@
             <input class="input span-2" placeholder="问题说明（可选）" value={issueNote} on:input={(event) => issueNote = event.currentTarget.value} />
             <button class="btn btn-sm variant-filled-secondary span-2" on:click={addWordIssue}>添加错词记录</button>
           </div>
+          {#if relapseNotice}<p class="relapse-note">{relapseNotice}</p>{/if}
           <div class="issue-list">
             {#each selectedAttempt.wordIssues.filter((issue) => issue.groupId === selectedGroupId) as issue}
-              <div class="issue-item">
+              <div class:resolved={issue.resolved} class="issue-item">
                 <span class="badge variant-filled-warning">{issue.category}</span>
                 <strong>{issue.word}</strong>
+                <span class="issue-actions">
+                  <button class:variant-soft-success={issue.resolved} class:variant-soft-primary={!issue.resolved} class="btn btn-sm" on:click={() => toggleIssueResolved(issue.id)}>{issue.resolved ? '✓ 已纠正' : '标为已纠正'}</button>
+                  <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
+                </span>
                 <p>{issue.note || '暂无补充说明'}</p>
-                <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
               </div>
             {/each}
             {#if !selectedAttempt.wordIssues.some((issue) => issue.groupId === selectedGroupId)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
@@ -672,11 +764,49 @@
           <div><strong>{averageDeviation}%</strong><span>平均偏差</span></div>
           <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length, 0)}</strong><span>错词记录</span></div>
         </div>
+        <div class="word-summary">
+          <div class="section-heading">
+            <div><span class="eyebrow">WORD RECOVERY</span><h3>错词纠正进度</h3></div>
+            <span class="chapter-badge">{wordSummaries.reduce((sum, item) => sum + item.pending, 0)} 条待纠正</span>
+          </div>
+          <div class="word-summary-list">
+            {#each wordSummaries as summary (summary.word)}
+              <div class="word-row">
+                <strong>{summary.word}</strong>
+                <span class="word-cats">{summary.categories.join(' / ')}</span>
+                <span class="word-recent">最近 第 {summary.lastNumber} 轮 · {summary.lastLabel}</span>
+                <span class:done={summary.pending === 0} class="pending-chip">{summary.pending ? `待纠正 ${summary.pending} 条` : '全部已纠正'} · 共 {summary.total} 条</span>
+              </div>
+            {:else}
+              <p class="empty-copy">还没有错词记录。</p>
+            {/each}
+          </div>
+        </div>
         <div class="category-list">
-          {#each totalIssueCategories as category}
-            <div><span>{category.category}</span><div class="mini-bar"><i style={`width:${Math.min(100, category.count * 18)}%`}></i></div><strong>{category.count}</strong></div>
+          {#each totalIssueCategories as entry}
+            <div>
+              <span>{entry.category}</span>
+              <div class="mini-bar"><i style={`width:${Math.min(100, entry.count * 18)}%`}></i></div>
+              <strong>{entry.count}</strong>
+              <button class="btn btn-sm variant-ghost" on:click={() => renameCategory(entry.category)}>改名</button>
+            </div>
           {/each}
         </div>
+        <div class="merge-tool">
+          <select class="select" bind:value={mergeSource}>
+            <option value="" disabled>选择要合并的分类</option>
+            {#each project.errorCategories as category}<option value={category}>{category}</option>{/each}
+          </select>
+          <span>合并到</span>
+          <select class="select" bind:value={mergeTarget}>
+            <option value="" disabled>目标分类</option>
+            {#each project.errorCategories.filter((category) => category !== mergeSource) as category}<option value={category}>{category}</option>{/each}
+          </select>
+          <button class="btn btn-sm variant-soft" on:click={mergeCategories} disabled={!mergeSource || !mergeTarget}>合并</button>
+        </div>
+        {#if mergeSource && mergeAffected > 0}
+          <p class="merge-hint">「{mergeSource}」下有 {mergeAffected} 条错词记录，合并后将全部归入「{mergeTarget || '目标分类'}」，历史记录同步更新。</p>
+        {/if}
         <div class="inline-actions">
           <input class="input" bind:value={newCategory} placeholder="新增错词分类" />
           <button class="btn btn-sm variant-soft" on:click={addCategory}>添加分类</button>
