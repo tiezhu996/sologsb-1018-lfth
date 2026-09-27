@@ -17,6 +17,14 @@ function openDb(): Promise<IDBDatabase> {
   })
 }
 
+function normalizeProject(project: PracticeProject): PracticeProject {
+  // Records saved before the resolved flag existed are treated as pending.
+  for (const attempt of project.attempts) {
+    for (const issue of attempt.wordIssues ?? []) issue.resolved = issue.resolved ?? false
+  }
+  return project
+}
+
 export async function loadPractice(): Promise<PracticeProject | null> {
   try {
     const db = await openDb()
@@ -27,10 +35,10 @@ export async function loadPractice(): Promise<PracticeProject | null> {
       request.onerror = () => reject(request.error)
     })
     db.close()
-    if (value?.project) return value.project
+    if (value?.project) return normalizeProject(value.project)
   } catch {
     const raw = localStorage.getItem(FALLBACK_KEY)
-    if (raw) return JSON.parse(raw) as PracticeProject
+    if (raw) return normalizeProject(JSON.parse(raw) as PracticeProject)
   }
   return null
 }

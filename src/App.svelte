@@ -5,6 +5,16 @@
   import { clearPractice, loadPractice, savePractice } from './storage'
   import type { Attempt, Intonation, PracticeProject, SenseGroup, StressLevel } from './types'
 
+  interface WordSummaryItem {
+    word: string
+    total: number
+    pending: number
+    lastAttemptNumber: number
+    lastAttemptLabel: string
+    categories: string[]
+    records: Array<{ id: string; attemptNumber: number; attemptLabel: string; category: string; note: string; resolved: boolean }>
+  }
+
   const intonationOptions: Array<{ value: Intonation; label: string }> = [
     { value: 'fall', label: '下降 ↘' },
     { value: 'rise', label: '上升 ↗' },
@@ -36,8 +46,15 @@
   let issueWord = ''
   let issueCategory = '声调'
   let issueNote = ''
+  let issueFormHint = ''
   let feedbackText = ''
   let newCategory = ''
+  let renamingCategory: string | null = null
+  let renameValue = ''
+  let renameError = ''
+  let mergingCategory: string | null = null
+  let mergeTarget = ''
+  let expandedWord = ''
   let undoStack: PracticeProject[] = []
   let redoStack: PracticeProject[] = []
   let selectedGroup: SenseGroup | undefined
@@ -51,6 +68,32 @@
   $: averageAccuracy = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / selectedAttempt.scores.length) : 0
   $: averageDeviation = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.deviation, 0) / selectedAttempt.scores.length) : 0
   $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length }))
+  $: wordSummary = buildWordSummary(project)
+  $: totalIssues = wordSummary.reduce((sum, item) => sum + item.total, 0)
+  $: totalPendingIssues = wordSummary.reduce((sum, item) => sum + item.pending, 0)
+  $: if (!project.errorCategories.includes(issueCategory)) issueCategory = project.errorCategories[0] ?? ''
+
+  function buildWordSummary(current: PracticeProject): WordSummaryItem[] {
+    const map = new Map<string, WordSummaryItem>()
+    for (const attempt of current.attempts) {
+      for (const issue of attempt.wordIssues) {
+        const word = issue.word.trim()
+        if (!word) continue
+        let item = map.get(word)
+        if (!item) {
+          item = { word, total: 0, pending: 0, lastAttemptNumber: 0, lastAttemptLabel: '', categories: [], records: [] }
+          map.set(word, item)
+        }
+        item.total += 1
+        if (!issue.resolved) item.pending += 1
+        item.lastAttemptNumber = attempt.number
+        item.lastAttemptLabel = attempt.label
+        if (!item.categories.includes(issue.category)) item.categories.push(issue.category)
+        item.records.push({ id: issue.id, attemptNumber: attempt.number, attemptLabel: attempt.label, category: issue.category, note: issue.note, resolved: issue.resolved })
+      }
+    }
+    return [...map.values()].sort((a, b) => b.pending - a.pending || b.lastAttemptNumber - a.lastAttemptNumber || a.word.localeCompare(b.word, 'zh-CN'))
+  }
 
   const clone = <T,>(value: T): T => structuredClone(value)
   const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -293,12 +336,29 @@
 
   function addWordIssue() {
     if (!selectedAttempt || !selectedGroup || !issueWord.trim()) return
+    const word = issueWord.trim()
+    // A word that errors again in a later take is not mastered: reopen every
+    // previously resolved record of the same word so it counts as pending again.
+    const reverted = project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.word.trim() === word && issue.resolved).length
     editProject((draft) => {
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.word.trim() === word) issue.resolved = false
+        }
+      }
       const attempt = draft.attempts.find((item) => item.id === selectedAttemptId)
-      attempt?.wordIssues.push({ id: uid('issue'), groupId: selectedGroupId, word: issueWord.trim(), category: issueCategory, note: issueNote.trim() })
+      attempt?.wordIssues.push({ id: uid('issue'), groupId: selectedGroupId, word, category: issueCategory, note: issueNote.trim(), resolved: false })
     })
+    issueFormHint = reverted ? `「${word}」此前已标为已纠正，本轮再次出错，已自动退回为待纠正。` : ''
     issueWord = ''
     issueNote = ''
+  }
+
+  function toggleIssueResolved(issueId: string) {
+    editProject((draft) => {
+      const issue = draft.attempts.flatMap((attempt) => attempt.wordIssues).find((item) => item.id === issueId)
+      if (issue) issue.resolved = !issue.resolved
+    })
   }
 
   function removeWordIssue(issueId: string) {
@@ -340,6 +400,61 @@
     if (!newCategory.trim() || project.errorCategories.includes(newCategory.trim())) return
     editProject((draft) => { draft.errorCategories.push(newCategory.trim()) })
     newCategory = ''
+  }
+
+  function startRenameCategory(category: string) {
+    renamingCategory = category
+    renameValue = category
+    renameError = ''
+    mergingCategory = null
+  }
+
+  function confirmRenameCategory() {
+    const oldName = renamingCategory
+    const next = renameValue.trim()
+    if (!oldName) return
+    if (!next || next === oldName) {
+      renamingCategory = null
+      return
+    }
+    if (project.errorCategories.includes(next)) {
+      renameError = '已存在同名分类，请改用「合并」。'
+      return
+    }
+    // Historical records follow the new name so old takes stay consistent.
+    editProject((draft) => {
+      draft.errorCategories = draft.errorCategories.map((category) => (category === oldName ? next : category))
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.category === oldName) issue.category = next
+        }
+      }
+    })
+    if (issueCategory === oldName) issueCategory = next
+    renamingCategory = null
+  }
+
+  function startMergeCategory(category: string) {
+    mergingCategory = category
+    mergeTarget = project.errorCategories.find((item) => item !== category) ?? ''
+    renamingCategory = null
+    renameError = ''
+  }
+
+  function confirmMergeCategory() {
+    const source = mergingCategory
+    const target = mergeTarget
+    if (!source || !target || source === target) return
+    editProject((draft) => {
+      draft.errorCategories = draft.errorCategories.filter((category) => category !== source)
+      for (const attempt of draft.attempts) {
+        for (const issue of attempt.wordIssues) {
+          if (issue.category === source) issue.category = target
+        }
+      }
+    })
+    if (issueCategory === source) issueCategory = target
+    mergingCategory = null
   }
 
   function resetSample() {
@@ -622,20 +737,25 @@
             <div><span class="eyebrow">ERROR TAGS</span><h2>错词分类</h2></div>
           </div>
           <div class="issue-form">
-            <input class="input" placeholder="错词或字" value={issueWord} on:input={(event) => issueWord = event.currentTarget.value} />
+            <input class="input" placeholder="错词或字" value={issueWord} on:input={(event) => { issueWord = event.currentTarget.value; issueFormHint = '' }} />
             <select class="select" value={issueCategory} on:change={(event) => issueCategory = event.currentTarget.value}>
               {#each project.errorCategories as category}<option value={category}>{category}</option>{/each}
             </select>
             <input class="input span-2" placeholder="问题说明（可选）" value={issueNote} on:input={(event) => issueNote = event.currentTarget.value} />
             <button class="btn btn-sm variant-filled-secondary span-2" on:click={addWordIssue}>添加错词记录</button>
           </div>
+          {#if issueFormHint}<p class="form-hint warning">{issueFormHint}</p>{/if}
           <div class="issue-list">
             {#each selectedAttempt.wordIssues.filter((issue) => issue.groupId === selectedGroupId) as issue}
-              <div class="issue-item">
+              <div class:resolved={issue.resolved} class="issue-item">
                 <span class="badge variant-filled-warning">{issue.category}</span>
-                <strong>{issue.word}</strong>
+                <strong class="issue-word">{issue.word}</strong>
+                <span class:cleared={issue.resolved} class="issue-state">{issue.resolved ? '已纠正' : '待纠正'}</span>
                 <p>{issue.note || '暂无补充说明'}</p>
-                <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
+                <div class="issue-actions">
+                  <button class="btn btn-sm variant-ghost" on:click={() => toggleIssueResolved(issue.id)}>{issue.resolved ? '↩ 重新打开' : '✓ 标为已纠正'}</button>
+                  <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
+                </div>
               </div>
             {/each}
             {#if !selectedAttempt.wordIssues.some((issue) => issue.groupId === selectedGroupId)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
@@ -670,11 +790,85 @@
           <div><strong>{project.attempts.length}</strong><span>累计尝试</span></div>
           <div><strong>{averageAccuracy}%</strong><span>当前准确度</span></div>
           <div><strong>{averageDeviation}%</strong><span>平均偏差</span></div>
-          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length, 0)}</strong><span>错词记录</span></div>
+          <div><strong class:pending-strong={totalPendingIssues > 0}>{totalPendingIssues}</strong><span>待纠正错词</span></div>
+        </div>
+
+        <div class="word-summary">
+          <div class="summary-heading">
+            <h3>错词纠正进度</h3>
+            <span>共 {totalIssues} 条记录 · {wordSummary.length} 个词 · 还剩 {totalPendingIssues} 条待纠正</span>
+          </div>
+          {#if !wordSummary.length}<p class="empty-copy">还没有错词记录，录音校对后即可在这里按词查看纠正进度。</p>{/if}
+          {#each wordSummary as item (item.word)}
+            <div class:cleared={item.pending === 0} class="word-row">
+              <button class="word-main" on:click={() => expandedWord = expandedWord === item.word ? '' : item.word}>
+                <strong>{item.word}</strong>
+                <span class="word-meta">最近出现：第 {item.lastAttemptNumber} 轮 · {item.lastAttemptLabel}</span>
+                <span class="word-cats">{item.categories.join('、')}</span>
+              </button>
+              <span class:pending={item.pending > 0} class="word-status">{item.pending > 0 ? `待纠正 ${item.pending}` : '全部已纠正'}</span>
+              <span class="word-total">{item.total} 条</span>
+            </div>
+            {#if expandedWord === item.word}
+              <div class="word-records">
+                {#each item.records as record (record.id)}
+                  <div class:resolved={record.resolved} class="word-record">
+                    <span class="record-where">第 {record.attemptNumber} 轮 · {record.attemptLabel}</span>
+                    <span class="badge variant-filled-warning">{record.category}</span>
+                    <p>{record.note || '暂无补充说明'}</p>
+                    <button class="btn btn-sm variant-ghost" on:click={() => toggleIssueResolved(record.id)}>{record.resolved ? '↩ 重新打开' : '✓ 标为已纠正'}</button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {/each}
+        </div>
+
+        <div class="summary-heading">
+          <h3>错词分类管理</h3>
+          <span>改名会同步更新历史记录；合并前会列出受影响条数</span>
         </div>
         <div class="category-list">
-          {#each totalIssueCategories as category}
-            <div><span>{category.category}</span><div class="mini-bar"><i style={`width:${Math.min(100, category.count * 18)}%`}></i></div><strong>{category.count}</strong></div>
+          {#each totalIssueCategories as entry (entry.category)}
+            <div class="category-row">
+              <div class="category-line">
+                <span>{entry.category}</span>
+                <div class="mini-bar"><i style={`width:${Math.min(100, entry.count * 18)}%`}></i></div>
+                <strong>{entry.count}</strong>
+                <span class="category-actions">
+                  <button class="btn btn-sm variant-ghost" on:click={() => startRenameCategory(entry.category)}>改名</button>
+                  <button class="btn btn-sm variant-ghost" disabled={project.errorCategories.length < 2} on:click={() => startMergeCategory(entry.category)}>合并</button>
+                </span>
+              </div>
+              {#if renamingCategory === entry.category}
+                <div class="category-edit">
+                  <input
+                    class="input"
+                    bind:value={renameValue}
+                    placeholder="新的分类名"
+                    on:keydown={(event) => { if (event.key === 'Enter') confirmRenameCategory(); if (event.key === 'Escape') renamingCategory = null }}
+                  />
+                  <button class="btn btn-sm variant-filled-primary" on:click={confirmRenameCategory}>确认改名</button>
+                  <button class="btn btn-sm variant-ghost" on:click={() => renamingCategory = null}>取消</button>
+                  {#if renameError}<span class="form-hint error">{renameError}</span>{/if}
+                  <span class="form-hint">历史记录中的「{entry.category}」会一起改名（当前 {entry.count} 条）。</span>
+                </div>
+              {/if}
+              {#if mergingCategory === entry.category}
+                <div class="category-edit">
+                  <select class="select" bind:value={mergeTarget}>
+                    {#each project.errorCategories.filter((category) => category !== entry.category) as target}<option value={target}>{target}</option>{/each}
+                  </select>
+                  <button class="btn btn-sm variant-filled-primary" disabled={!mergeTarget} on:click={confirmMergeCategory}>确认合并</button>
+                  <button class="btn btn-sm variant-ghost" on:click={() => mergingCategory = null}>取消</button>
+                  <span class="form-hint" class:warning={entry.count > 0}>
+                    {entry.count > 0
+                      ? `「${entry.category}」还有 ${entry.count} 条错词记录，合并后全部归入「${mergeTarget}」，且该分类将被移除。`
+                      : `「${entry.category}」下没有错词记录，合并仅移除该分类名。`}
+                  </span>
+                </div>
+              {/if}
+            </div>
           {/each}
         </div>
         <div class="inline-actions">

@@ -28,8 +28,8 @@ export function createSampleProject(): PracticeProject {
         rangeEnd: 7.6,
         scores: groups.map((group, index) => ({ groupId: group.id, accuracy: [78, 72, 66, 74][index], rhythm: [72, 68, 61, 70][index], deviation: [16, 22, 29, 19][index], note: index === 2 ? '第三意群停顿过长。' : '' })),
         wordIssues: [
-          { id: 'issue-1', groupId: 'group-2', word: '掠过', category: '声调', note: '去声下探不够明确。' },
-          { id: 'issue-2', groupId: 'group-3', word: '信', category: '韵尾', note: '前鼻音收得不稳。' }
+          { id: 'issue-1', groupId: 'group-2', word: '掠过', category: '声调', note: '去声下探不够明确。', resolved: true },
+          { id: 'issue-2', groupId: 'group-3', word: '信', category: '韵尾', note: '前鼻音收得不稳。', resolved: false }
         ],
         feedback: [
           { id: 'feedback-1', groupId: 'group-2', teacher: '陈老师', text: '“掠”字再轻一点，把重音留给后面的“旧码头”。', createdAt: new Date(Date.now() - 82000000).toISOString() },
@@ -49,7 +49,7 @@ export function createSampleProject(): PracticeProject {
         rangeEnd: 6.8,
         scores: groups.map((group, index) => ({ groupId: group.id, accuracy: [83, 79, 75, 78][index], rhythm: [78, 76, 72, 77][index], deviation: [10, 13, 17, 13][index], note: index === 2 ? '停顿仍略长。' : '' })),
         wordIssues: [
-          { id: 'issue-3', groupId: 'group-3', word: '信', category: '韵尾', note: '比上一轮稳定。' }
+          { id: 'issue-3', groupId: 'group-3', word: '信', category: '韵尾', note: '比上一轮稳定。', resolved: false }
         ],
         feedback: [
           { id: 'feedback-3', groupId: 'group-3', teacher: '陈老师', text: '节奏明显改善，下一轮注意句尾“回答”的两层语调。', createdAt: new Date(Date.now() - 35000000).toISOString() }

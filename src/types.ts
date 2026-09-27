@@ -25,6 +25,7 @@ export interface WordIssue {
   word: string
   category: string
   note: string
+  resolved: boolean
 }
 
 export interface SegmentFeedback {
